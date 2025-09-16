@@ -4,44 +4,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
 from sklearn.ensemble import RandomForestClassifier
 import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from contextlib import contextmanager
 import uuid
 from typing import Optional
 import traceback
 from datetime import datetime
+import os
+from urllib.parse import urlparse
 
 # ==============================
 # Database config (Postgres)
 # ==============================
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("❌ DATABASE_URL chưa được cấu hình trong Environment Variables")
+
+url = urlparse(DATABASE_URL)
+
 DB_CONFIG = {
-    "dbname": "size_predictions",
-    "user": "postgres",
-    "password": "123456",
-    "host": "localhost",
-    "port": "5432"
+    "dbname": url.path[1:],  # bỏ dấu "/" đầu
+    "user": url.username,
+    "password": url.password,
+    "host": url.hostname,
+    "port": url.port,
 }
 
-def create_database_if_not_exists():
-    conn = psycopg2.connect(
-        dbname="postgres",
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-    )
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (DB_CONFIG["dbname"],))
-    exists = cursor.fetchone()
-    if not exists:
-        cursor.execute(f"CREATE DATABASE {DB_CONFIG['dbname']}")
-        print(f"✅ Database {DB_CONFIG['dbname']} đã được tạo")
-    cursor.close()
-    conn.close()
-
 def init_database():
-    create_database_if_not_exists()
+    """Chỉ tạo bảng nếu chưa có, không tạo database mới"""
     conn = psycopg2.connect(**DB_CONFIG)
     cursor = conn.cursor()
 
@@ -82,7 +72,7 @@ def init_database():
         )
     ''')
 
-    # modstatus - bảng lưu feedback từ người dùng
+    # modstatus
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS modstatus (
             id SERIAL PRIMARY KEY,
@@ -175,7 +165,7 @@ class TrainingData(BaseModel):
 class FeedbackData(BaseModel):
     feedback: str
     actual_size: Optional[str] = None
-    notes: Optional[str] = None  # thêm notes để ghi chú
+    notes: Optional[str] = None
 
 # ==============================
 # FastAPI app
@@ -206,25 +196,21 @@ def predict_size(data: SizeInput):
         if model_key not in models:
             raise HTTPException(status_code=400, detail="Model không tồn tại")
 
-        # ML prediction
         predicted_size = models[model_key].predict(features)[0]
 
-        # Rule-based adjust theo BMI + body_type
         size_order_shirt = ["S","M","L","XL","XXL"]
         size_order_pants = ["26","27","28","29","30","32","34","36"]
-
         size_order = size_order_shirt if data.item_type=="shirt" else size_order_pants
-        idx = size_order.index(predicted_size) if predicted_size in size_order else 0
 
+        idx = size_order.index(predicted_size) if predicted_size in size_order else 0
         bmi = data.weight / ((data.height / 100) ** 2)
 
-        # Adjust BMI
         if data.item_type=="shirt":
             if bmi > 25 and idx < len(size_order)-1:
                 idx += 1
             elif bmi < 18.5 and idx > 0:
                 idx -= 1
-        # Adjust body type
+
         if data.body_type=="Gầy" and idx>0:
             idx -= 1
         elif data.body_type=="Đầy đặn" and idx < len(size_order)-1:
@@ -246,7 +232,6 @@ def predict_size(data: SizeInput):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/add-training-data")
 def add_training_data(data: TrainingData):
     try:
@@ -262,28 +247,22 @@ def add_training_data(data: TrainingData):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/feedback/{prediction_id}")
 def feedback(prediction_id: str, fb: FeedbackData):
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            
-            # Lấy thông tin prediction để lưu vào modstatus
             cursor.execute("SELECT * FROM predictions WHERE id=%s", (prediction_id,))
             prediction = cursor.fetchone()
-            
             if prediction is None:
                 raise HTTPException(status_code=404, detail="Không tìm thấy prediction")
 
-            # Update bảng predictions như cũ
             cursor.execute('''
                 UPDATE predictions
                 SET user_feedback=%s, actual_size=%s, is_correct=%s, feedback_at=NOW()
                 WHERE id=%s
             ''', (fb.feedback, fb.actual_size, fb.feedback=="correct", prediction_id))
 
-            # Lưu feedback vào bảng modstatus
             cursor.execute('''
                 INSERT INTO modstatus (
                     prediction_id, user_feedback, actual_size, predicted_size,
@@ -294,27 +273,24 @@ def feedback(prediction_id: str, fb: FeedbackData):
                 prediction_id,
                 fb.feedback,
                 fb.actual_size,
-                prediction[5],  # predicted_size from predictions table
+                prediction[5],
                 fb.feedback == "correct",
-                prediction[1],  # height
-                prediction[2],  # weight
-                prediction[3],  # gender
-                prediction[4],  # item_type
-                prediction[7],  # body_type
+                prediction[1],
+                prediction[2],
+                prediction[3],
+                prediction[4],
+                prediction[7],
                 fb.notes
             ))
-            
             conn.commit()
-            
+
         return {"message": "Feedback đã được lưu vào modstatus", "prediction_id": prediction_id}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/modstatus")
 def get_modstatus(limit: int = 50):
-    """Lấy danh sách feedback từ bảng modstatus"""
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -326,25 +302,23 @@ def get_modstatus(limit: int = 50):
                 ORDER BY created_at DESC
                 LIMIT %s
             ''', (limit,))
-            
             results = cursor.fetchall()
+
             columns = ['id', 'prediction_id', 'user_feedback', 'actual_size', 'predicted_size',
                       'is_correct', 'height', 'weight', 'gender', 'item_type', 'body_type',
                       'notes', 'created_at']
-            
+
             feedback_list = []
             for row in results:
                 feedback_dict = dict(zip(columns, row))
-                # Convert datetime to string
                 if feedback_dict['created_at']:
                     feedback_dict['created_at'] = feedback_dict['created_at'].isoformat()
                 feedback_list.append(feedback_dict)
-            
+
         return {"feedback_count": len(feedback_list), "feedbacks": feedback_list}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/")
 def root():
