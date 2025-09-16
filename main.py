@@ -1,131 +1,53 @@
-# app.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
 from sklearn.ensemble import RandomForestClassifier
-import psycopg2
-from contextlib import contextmanager
-import uuid
 from typing import Optional
-import traceback
 from datetime import datetime
+import traceback
+import uuid
 import os
-from urllib.parse import urlparse
+from pymongo import MongoClient
+from dotenv import load_dotenv
 
 # ==============================
-# Database config (Postgres)
+# Load .env
 # ==============================
-DATABASE_URL = os.getenv("DATABASE_URL")
+load_dotenv()
 
-if not DATABASE_URL:
-    raise RuntimeError("❌ DATABASE_URL chưa được cấu hình trong Environment Variables")
+# ==============================
+# Database config (MongoDB Atlas)
+# ==============================
+MONGO_URL = os.getenv("MONGO_URL")
 
-url = urlparse(DATABASE_URL)
+if not MONGO_URL:
+    raise RuntimeError("❌ MONGO_URL chưa được cấu hình trong Environment Variables")
 
-DB_CONFIG = {
-    "dbname": url.path[1:],  # bỏ dấu "/" đầu
-    "user": url.username,
-    "password": url.password,
-    "host": url.hostname,
-    "port": url.port,
-}
-
-def init_database():
-    """Chỉ tạo bảng nếu chưa có, không tạo database mới"""
-    conn = psycopg2.connect(**DB_CONFIG)
-    cursor = conn.cursor()
-
-    # training_data
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS training_data (
-            id SERIAL PRIMARY KEY,
-            height INTEGER NOT NULL,
-            weight INTEGER NOT NULL,
-            gender VARCHAR(20) NOT NULL,
-            item_type VARCHAR(20) NOT NULL,
-            actual_size VARCHAR(20) NOT NULL,
-            foot_length FLOAT,
-            chest_size FLOAT,
-            waist_size FLOAT,
-            hip_size FLOAT,
-            brand VARCHAR(50),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # predictions
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS predictions (
-            id UUID PRIMARY KEY,
-            height INTEGER NOT NULL,
-            weight INTEGER NOT NULL,
-            gender VARCHAR(20) NOT NULL,
-            item_type VARCHAR(20) NOT NULL,
-            predicted_size VARCHAR(20) NOT NULL,
-            confidence_score VARCHAR(20),
-            body_type VARCHAR(20),
-            user_feedback VARCHAR(50),
-            actual_size VARCHAR(20),
-            is_correct BOOLEAN,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            feedback_at TIMESTAMP
-        )
-    ''')
-
-    # modstatus
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS modstatus (
-            id SERIAL PRIMARY KEY,
-            prediction_id UUID REFERENCES predictions(id),
-            user_feedback VARCHAR(50) NOT NULL,
-            actual_size VARCHAR(20),
-            feedback_type VARCHAR(20) DEFAULT 'user_correction',
-            predicted_size VARCHAR(20),
-            is_correct BOOLEAN,
-            height INTEGER,
-            weight INTEGER,
-            gender VARCHAR(20),
-            item_type VARCHAR(20),
-            body_type VARCHAR(20),
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
-
-@contextmanager
-def get_db():
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
-        yield conn
-    finally:
-        conn.close()
+client = MongoClient(MONGO_URL)
+db = client["size_predictions"]
 
 # ==============================
 # Training dataset mẫu
 # ==============================
-X_male_shirt = [[165,55],[170,65],[175,75],[180,85]]
-y_male_shirt = ["S","M","L","XL"]
+X_male_shirt = [[165, 55], [170, 65], [175, 75], [180, 85]]
+y_male_shirt = ["S", "M", "L", "XL"]
 
-X_female_shirt = [[155,45],[160,50],[165,55],[170,60]]
-y_female_shirt = ["S","M","L","XL"]
+X_female_shirt = [[155, 45], [160, 50], [165, 55], [170, 60]]
+y_female_shirt = ["S", "M", "L", "XL"]
 
-X_male_pants = [[165,55],[170,65],[175,75],[180,85],[185,90]]
-y_male_pants = ["28","30","32","34","36"]
+X_male_pants = [[165, 55], [170, 65], [175, 75], [180, 85], [185, 90]]
+y_male_pants = ["28", "30", "32", "34", "36"]
 
-X_female_pants = [[155,45],[160,50],[165,55],[170,60]]
-y_female_pants = ["26","27","28","29"]
+X_female_pants = [[155, 45], [160, 50], [165, 55], [170, 60]]
+y_female_pants = ["26", "27", "28", "29"]
 
 models = {}
 
 def train_models():
-    models['male_shirt'] = RandomForestClassifier().fit(X_male_shirt, y_male_shirt)
-    models['female_shirt'] = RandomForestClassifier().fit(X_female_shirt, y_female_shirt)
-    models['male_pants'] = RandomForestClassifier().fit(X_male_pants, y_male_pants)
-    models['female_pants'] = RandomForestClassifier().fit(X_female_pants, y_female_pants)
+    models["male_shirt"] = RandomForestClassifier().fit(X_male_shirt, y_male_shirt)
+    models["female_shirt"] = RandomForestClassifier().fit(X_female_shirt, y_female_shirt)
+    models["male_pants"] = RandomForestClassifier().fit(X_male_pants, y_male_pants)
+    models["female_pants"] = RandomForestClassifier().fit(X_female_pants, y_female_pants)
 
 # ==============================
 # Pydantic Schemas
@@ -137,21 +59,21 @@ class SizeInput(BaseModel):
     item_type: str
     body_type: Optional[str] = "Bình thường"
 
-    @validator('gender')
+    @validator("gender")
     def validate_gender(cls, v):
-        if v.lower() not in ['male','female']:
+        if v.lower() not in ["male", "female"]:
             raise ValueError("Gender phải là male hoặc female")
         return v.lower()
 
-    @validator('item_type')
+    @validator("item_type")
     def validate_item_type(cls, v):
-        if v.lower() not in ['shirt','pants']:
+        if v.lower() not in ["shirt", "pants"]:
             raise ValueError("Item phải là shirt hoặc pants")
         return v.lower()
 
-    @validator('body_type')
+    @validator("body_type")
     def validate_body_type(cls, v):
-        if v not in ['Gầy', 'Bình thường', 'Đầy đặn']:
+        if v not in ["Gầy", "Bình thường", "Đầy đặn"]:
             raise ValueError("Body type phải là Gầy / Bình thường / Đầy đặn")
         return v
 
@@ -170,7 +92,7 @@ class FeedbackData(BaseModel):
 # ==============================
 # FastAPI app
 # ==============================
-app = FastAPI(title="Size Prediction API with PostgreSQL + Body Type + ModStatus")
+app = FastAPI(title="Size Prediction API with MongoDB + Body Type + ModStatus")
 
 app.add_middleware(
     CORSMiddleware,
@@ -181,7 +103,6 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    init_database()
     train_models()
 
 # ==============================
@@ -198,36 +119,40 @@ def predict_size(data: SizeInput):
 
         predicted_size = models[model_key].predict(features)[0]
 
-        size_order_shirt = ["S","M","L","XL","XXL"]
-        size_order_pants = ["26","27","28","29","30","32","34","36"]
-        size_order = size_order_shirt if data.item_type=="shirt" else size_order_pants
+        size_order_shirt = ["S", "M", "L", "XL", "XXL"]
+        size_order_pants = ["26", "27", "28", "29", "30", "32", "34", "36"]
+        size_order = size_order_shirt if data.item_type == "shirt" else size_order_pants
 
         idx = size_order.index(predicted_size) if predicted_size in size_order else 0
         bmi = data.weight / ((data.height / 100) ** 2)
 
-        if data.item_type=="shirt":
-            if bmi > 25 and idx < len(size_order)-1:
+        if data.item_type == "shirt":
+            if bmi > 25 and idx < len(size_order) - 1:
                 idx += 1
             elif bmi < 18.5 and idx > 0:
                 idx -= 1
 
-        if data.body_type=="Gầy" and idx>0:
+        if data.body_type == "Gầy" and idx > 0:
             idx -= 1
-        elif data.body_type=="Đầy đặn" and idx < len(size_order)-1:
-            idx +=1
+        elif data.body_type == "Đầy đặn" and idx < len(size_order) - 1:
+            idx += 1
 
         predicted_size = size_order[idx]
 
         prediction_id = str(uuid.uuid4())
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO predictions (id,height,weight,gender,item_type,predicted_size,confidence_score,body_type)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-            ''', (prediction_id, data.height, data.weight, data.gender, data.item_type, predicted_size, "medium", data.body_type))
-            conn.commit()
+        db.predictions.insert_one({
+            "id": prediction_id,
+            "height": data.height,
+            "weight": data.weight,
+            "gender": data.gender,
+            "item_type": data.item_type,
+            "predicted_size": predicted_size,
+            "confidence_score": "medium",
+            "body_type": data.body_type,
+            "created_at": datetime.utcnow()
+        })
 
-        return {"prediction_id": prediction_id, "predicted_size": predicted_size, "bmi": round(bmi,1)}
+        return {"prediction_id": prediction_id, "predicted_size": predicted_size, "bmi": round(bmi, 1)}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -235,13 +160,10 @@ def predict_size(data: SizeInput):
 @app.post("/add-training-data")
 def add_training_data(data: TrainingData):
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO training_data (height,weight,gender,item_type,actual_size)
-                VALUES (%s,%s,%s,%s,%s)
-            ''', (data.height, data.weight, data.gender, data.item_type, data.actual_size))
-            conn.commit()
+        db.training_data.insert_one({
+            **data.dict(),
+            "created_at": datetime.utcnow()
+        })
         return {"message": "Đã thêm dữ liệu training", "data": data.dict()}
     except Exception as e:
         traceback.print_exc()
@@ -250,39 +172,34 @@ def add_training_data(data: TrainingData):
 @app.post("/feedback/{prediction_id}")
 def feedback(prediction_id: str, fb: FeedbackData):
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM predictions WHERE id=%s", (prediction_id,))
-            prediction = cursor.fetchone()
-            if prediction is None:
-                raise HTTPException(status_code=404, detail="Không tìm thấy prediction")
+        prediction = db.predictions.find_one({"id": prediction_id})
+        if not prediction:
+            raise HTTPException(status_code=404, detail="Không tìm thấy prediction")
 
-            cursor.execute('''
-                UPDATE predictions
-                SET user_feedback=%s, actual_size=%s, is_correct=%s, feedback_at=NOW()
-                WHERE id=%s
-            ''', (fb.feedback, fb.actual_size, fb.feedback=="correct", prediction_id))
+        db.predictions.update_one(
+            {"id": prediction_id},
+            {"$set": {
+                "user_feedback": fb.feedback,
+                "actual_size": fb.actual_size,
+                "is_correct": fb.feedback == "correct",
+                "feedback_at": datetime.utcnow()
+            }}
+        )
 
-            cursor.execute('''
-                INSERT INTO modstatus (
-                    prediction_id, user_feedback, actual_size, predicted_size,
-                    is_correct, height, weight, gender, item_type, body_type, notes
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (
-                prediction_id,
-                fb.feedback,
-                fb.actual_size,
-                prediction[5],
-                fb.feedback == "correct",
-                prediction[1],
-                prediction[2],
-                prediction[3],
-                prediction[4],
-                prediction[7],
-                fb.notes
-            ))
-            conn.commit()
+        db.modstatus.insert_one({
+            "prediction_id": prediction_id,
+            "user_feedback": fb.feedback,
+            "actual_size": fb.actual_size,
+            "predicted_size": prediction["predicted_size"],
+            "is_correct": fb.feedback == "correct",
+            "height": prediction["height"],
+            "weight": prediction["weight"],
+            "gender": prediction["gender"],
+            "item_type": prediction["item_type"],
+            "body_type": prediction.get("body_type"),
+            "notes": fb.notes,
+            "created_at": datetime.utcnow()
+        })
 
         return {"message": "Feedback đã được lưu vào modstatus", "prediction_id": prediction_id}
     except Exception as e:
@@ -292,28 +209,13 @@ def feedback(prediction_id: str, fb: FeedbackData):
 @app.get("/modstatus")
 def get_modstatus(limit: int = 50):
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, prediction_id, user_feedback, actual_size, predicted_size,
-                       is_correct, height, weight, gender, item_type, body_type, 
-                       notes, created_at
-                FROM modstatus
-                ORDER BY created_at DESC
-                LIMIT %s
-            ''', (limit,))
-            results = cursor.fetchall()
-
-            columns = ['id', 'prediction_id', 'user_feedback', 'actual_size', 'predicted_size',
-                      'is_correct', 'height', 'weight', 'gender', 'item_type', 'body_type',
-                      'notes', 'created_at']
-
-            feedback_list = []
-            for row in results:
-                feedback_dict = dict(zip(columns, row))
-                if feedback_dict['created_at']:
-                    feedback_dict['created_at'] = feedback_dict['created_at'].isoformat()
-                feedback_list.append(feedback_dict)
+        results = db.modstatus.find().sort("created_at", -1).limit(limit)
+        feedback_list = []
+        for r in results:
+            r["_id"] = str(r["_id"])  # convert ObjectId to string
+            if "created_at" in r:
+                r["created_at"] = r["created_at"].isoformat()
+            feedback_list.append(r)
 
         return {"feedback_count": len(feedback_list), "feedbacks": feedback_list}
     except Exception as e:
@@ -322,4 +224,4 @@ def get_modstatus(limit: int = 50):
 
 @app.get("/")
 def root():
-    return {"message": "Size Prediction API with PostgreSQL + Body Type + ModStatus running 🚀"}
+    return {"message": "Size Prediction API with MongoDB + Body Type + ModStatus running 🚀"}

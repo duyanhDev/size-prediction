@@ -1,5 +1,5 @@
 fastapi
 uvicorn[standard]
-psycopg2-binary
-scikit-learn
+motor
 python-dotenv
+scikit-learn
